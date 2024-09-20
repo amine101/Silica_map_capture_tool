@@ -12,13 +12,16 @@ import cv2
 import numpy as np
 import logging
 import re
+import shutil 
+import configparser
+
 
 # Setup the logger
 logging.basicConfig(
     level=logging.DEBUG,  # Set the default log level to DEBUG
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("screenshot_tool.log"),
+        logging.FileHandler("debug.log"),
         logging.StreamHandler()
     ]
 )
@@ -32,6 +35,11 @@ class ScreenshotApp:
         self.root.geometry("400x550")
         self.root.resizable(False, False)  # Disable window resizing
 
+        # Define and Load the configuration
+        self.config = configparser.ConfigParser()
+        self.config_file = "config.ini"
+        self.load_config()
+
         # Apply a style theme
         self.style = ttk.Style()
         self.style.theme_use('default')
@@ -40,39 +48,16 @@ class ScreenshotApp:
         self.style.configure('TEntry', font=('Arial', 10))
         self.style.configure('Header.TLabel', font=('Arial', 12, 'bold'))
 
-        self.screenshot_interval_var = tk.StringVar(value="10")  # Variable for real-time interval adjustment
+        # Use the full path provided by the user
+        self.sessions_folder = self.normalize_path(self.config['DEFAULT']['sessions_folder'])
+        # Ensure the session folder exists
+        self.ensure_directory(self.sessions_folder)
+
+        self.screenshot_interval_var = tk.StringVar(value=self.config['DEFAULT']['screenshot_interval'])
         self.screenshot_count = 0
         self.is_running = False
         self.start_time = None
         self.session_folder = ""
-
-        # Set default parent folder to user's Pictures directory / "Silica Sessions"
-        pictures_folder = os.path.join(os.path.expanduser("~"), "Pictures")
-        silica_sessions_folder = os.path.join(pictures_folder, "Silica Sessions")
-
-        if os.path.exists(pictures_folder):
-            try:
-                # Attempt to create the "Silica Sessions" subfolder
-                os.makedirs(silica_sessions_folder, exist_ok=True)
-                self.parent_folder = silica_sessions_folder
-                logging.info(f"Using sessions folder: {self.parent_folder}")
-            except Exception as e:
-                logging.error(f"Error creating Silica Sessions folder: {e}")
-                logging.info("Falling back to Pictures folder.")
-                self.parent_folder = pictures_folder
-        else:
-            # Pictures folder does not exist
-            logging.warning("Pictures folder does not exist.")
-            # Prompt user to select a sessions folder
-            messagebox.showwarning("Folder Not Found", "Pictures folder not found. Please select a sessions folder.")
-            new_folder = filedialog.askdirectory(initialdir=os.path.expanduser("~"), title="Select Sessions Folder")
-            if new_folder:
-                self.parent_folder = new_folder
-                logging.info(f"User selected sessions folder: {self.parent_folder}")
-            else:
-                # User canceled the dialog
-                logging.warning("User did not select a sessions folder. Using home directory.")
-                self.parent_folder = os.path.expanduser("~")
 
         # Get current screen resolution
         self.screen_width, self.screen_height = pyautogui.size()
@@ -82,10 +67,10 @@ class ScreenshotApp:
         self.y_scale = self.screen_height / 1080
 
         # Adjustable initial delay before starting the session
-        self.initial_delay = 5  # seconds
+        self.initial_delay = int(self.config['DEFAULT']['initial_delay'])  # seconds
 
         # Adjustable frame duration for the GIF
-        self.gif_frame_duration = 0.5  # seconds per frame
+        self.gif_frame_duration = float(self.config['DEFAULT']['gif_frame_duration'])  # seconds per frame
 
         # GUI Elements
         main_frame = ttk.Frame(root, padding="10")
@@ -94,11 +79,11 @@ class ScreenshotApp:
         # Sessions Folder
         folder_frame = ttk.Frame(main_frame)
         folder_frame.pack(fill=tk.X, pady=5)
-        self.parent_folder_label = ttk.Label(folder_frame, text=f"Sessions Folder:", style='Header.TLabel')
-        self.parent_folder_label.pack(side=tk.LEFT)
-        self.folder_path_label = ttk.Label(folder_frame, text=self.parent_folder, wraplength=300)
+        self.sessions_folder_label = ttk.Label(folder_frame, text=f"Sessions Folder:", style='Header.TLabel')
+        self.sessions_folder_label.pack(side=tk.LEFT)
+        self.folder_path_label = ttk.Label(folder_frame, text=self.sessions_folder, wraplength=300)
         self.folder_path_label.pack(side=tk.LEFT, padx=5)
-        self.change_folder_button = ttk.Button(main_frame, text="Change Sessions Folder", command=self.change_parent_folder)
+        self.change_folder_button = ttk.Button(main_frame, text="Change Sessions Folder", command=self.change_sessions_folder)
         self.change_folder_button.pack(fill=tk.X, pady=5)
 
         # Interval Setting
@@ -108,6 +93,11 @@ class ScreenshotApp:
         interval_label.pack(side=tk.LEFT)
         self.interval_entry = ttk.Entry(interval_frame, textvariable=self.screenshot_interval_var, width=10)
         self.interval_entry.pack(side=tk.LEFT, padx=5)
+
+        # Checkbox to save settings for future use
+        self.save_settings_var = tk.BooleanVar(value=False)  # Default: unchecked
+        self.save_settings_checkbox = ttk.Checkbutton(root, text="Save Settings for Future Use", variable=self.save_settings_var)
+        self.save_settings_checkbox.pack(pady=10)
 
         # Control Buttons
         button_frame = ttk.Frame(main_frame)
@@ -121,8 +111,29 @@ class ScreenshotApp:
         self.generate_gif_button = ttk.Button(main_frame, text="Generate GIF", command=self.generate_gif)
         self.generate_gif_button.pack(fill=tk.X, pady=5)
 
+        # Copy GIF Option Frame
+        gif_copy_frame = ttk.Frame(main_frame)
+        gif_copy_frame.pack(fill=tk.X, pady=5)
+
+        self.export_gif_var = tk.BooleanVar(value=self.config['DEFAULT'].getboolean('gif_export', False))  # Initialize based on config file
+        self.export_gif_checkbox = ttk.Checkbutton(gif_copy_frame, text="Export GIF to another location", variable=self.export_gif_var, command=self.toggle_gif_copy)
+        self.export_gif_checkbox.pack(side=tk.LEFT)
+
+        # Remove the text entry and directly use the folder selection button
+        self.browse_gif_copy_button = ttk.Button(main_frame, text="Select GIF Export Folder", command=self.select_gif_export, state=tk.DISABLED if not self.export_gif_var.get() else tk.NORMAL)
+        self.browse_gif_copy_button.pack(fill=tk.X, pady=5)
+
+        # GIF Export Folder Label (initially hidden if export_gif is False)
+        gif_export_frame = ttk.Frame(main_frame)
+        gif_export_frame.pack(fill=tk.X, pady=5)
+        self.gif_export_folder_label = ttk.Label(gif_export_frame, text=f"GIF Export Folder: {self.gif_export_folder}", wraplength=300)
+
+        if self.export_gif_var.get():
+            self.gif_export_folder_label.pack(side=tk.LEFT)  # Show only if checkbox is checked
+
+
         # Open Folder Button
-        self.open_folder_button = ttk.Button(main_frame, text="Open Last Screenshot Folder", command=self.open_last_screenshot_folder)
+        self.open_folder_button = ttk.Button(main_frame, text="Open Last Session Folder", command=self.open_last_screenshot_folder)
         self.open_folder_button.pack(fill=tk.X, pady=5)
 
         # Status Labels
@@ -131,19 +142,63 @@ class ScreenshotApp:
 
         self.elapsed_time_label = ttk.Label(main_frame, text="Elapsed Time: 0s")
         self.elapsed_time_label.pack(pady=5)
+        
+    def load_config(self):
+        """Load configuration from config file."""
+        try:
+            self.config.read(self.config_file)
+            logging.info("Configuration loaded successfully.")
+        except Exception as e:
+            logging.error(f"Error loading configuration file: {e}")
+        
+        # Set default GIF export folder
+        self.gif_export_folder = self.normalize_path(self.config['DEFAULT'].get('gif_export_folder', ''))
 
-    def change_parent_folder(self):
-        new_folder = filedialog.askdirectory(initialdir=self.parent_folder, title="Select Sessions Folder")
+
+    def save_config(self):
+        """Save the current configuration to the config file."""
+        self.config['DEFAULT']['screenshot_interval'] = self.screenshot_interval_var.get()
+        self.config['DEFAULT']['sessions_folder'] = self.sessions_folder
+        self.config['DEFAULT']['initial_delay'] = str(self.initial_delay)
+        self.config['DEFAULT']['gif_frame_duration'] = str(self.gif_frame_duration)
+        self.config['DEFAULT']['gif_export_folder'] = self.gif_export_folder
+        self.config['DEFAULT']['gif_export'] = str(self.export_gif_var.get())  # Save checkbox state
+        
+        with open(self.config_file, 'w') as configfile:
+            self.config.write(configfile)
+            logging.info("Configuration saved successfully.")
+
+
+    def normalize_path(self, path):
+        """Normalize paths to handle different formats (slashes, backslashes, etc.), and remove extra quotes."""
+        path = path.strip().strip('"')  # Strip any leading/trailing spaces or quotation marks
+        normalized_path = os.path.normpath(path)  # Normalize the path format
+        return normalized_path
+
+    def ensure_directory(self, path):
+        """Ensure the directory exists, attempt to create it if it doesn't."""
+        if not os.path.exists(path):
+            try:
+                os.makedirs(path, exist_ok=True)
+                logging.info(f"Directory created: {path}")
+            except Exception as e:
+                logging.error(f"Failed to create directory: {path}. Error: {e}")
+                raise RuntimeError(f"Failed to create directory: {path}. Error: {e}")
+        else:
+            logging.info(f"Directory already exists: {path}")
+     
+    def change_sessions_folder(self):
+        new_folder = filedialog.askdirectory(initialdir=self.sessions_folder, title="Select Sessions Folder")
         if new_folder:
-            self.parent_folder = new_folder
-            self.folder_path_label.config(text=self.parent_folder)
-            logging.info(f"Changed sessions folder to: {self.parent_folder}")
+            self.sessions_folder = new_folder
+            self.folder_path_label.config(text=self.sessions_folder)
+            logging.info(f"Changed sessions folder to: {self.sessions_folder}")
         else:
             logging.info("User canceled folder selection.")
 
     def start_session(self):
         try:
-            self.screenshot_interval = int(self.screenshot_interval_var.get())
+            self.screenshot_interval = float(self.screenshot_interval_var.get())
         except ValueError:
             logging.error("Invalid interval input by user.")
             messagebox.showerror("Invalid Input", "Please enter a valid number for the interval.")
@@ -151,7 +206,7 @@ class ScreenshotApp:
         
         self.screenshot_count = 0
         self.start_time = time.time()
-        self.session_folder = os.path.join(self.parent_folder, time.strftime("%Y%m%d_%H%M%S"))
+        self.session_folder = os.path.join(self.sessions_folder, time.strftime("%Y%m%d_%H%M%S"))
         os.makedirs(self.session_folder, exist_ok=True)
         logging.info(f"Session folder created: {self.session_folder}")
         # Create the debug folder
@@ -164,6 +219,9 @@ class ScreenshotApp:
         self.screenshot_thread.start()
         logging.info("Screenshot session started.")
 
+        # Save settings if the checkbox is checked
+        if self.save_settings_var.get():
+            self.save_config()
 
     def preprocess_image(self, image):
         logging.debug("Preprocessing image for text extraction.")
@@ -252,9 +310,9 @@ class ScreenshotApp:
 
             # Define the chat region
             chat_area = (
-                int(20 * self.x_scale),  # Controls the x-coordinate of the left edge.
+                int(20 * self.x_scale),   # Controls the x-coordinate of the left edge.
                 int(700 * self.y_scale),  # Controls the y-coordinate of the top edge.
-                int(75 * self.x_scale),  # Controls the x-coordinate of the right edge.
+                int(75 * self.x_scale),   # Controls the x-coordinate of the right edge.
                 int(725 * self.y_scale)   # Controls the y-coordinate of the bottom edge.
             )
 
@@ -356,9 +414,14 @@ class ScreenshotApp:
         self.is_running = False
         logging.info("Screenshot session stopped.")
         self.update_ui()
-        # GIF generation is now manual via the "Generate GIF" button
+
+        # Save settings if the checkbox is checked
+        if self.save_settings_var.get():
+            self.save_config()
 
     def generate_gif(self):
+        gif_created=False
+        gif_name='session.gif'
         if not self.session_folder or not os.path.exists(self.session_folder):
             logging.warning("No session folder found to generate GIF.")
             messagebox.showwarning("No Session", "No session folder found to generate GIF.")
@@ -435,23 +498,66 @@ class ScreenshotApp:
                 images.append(combined)
 
             if images:
-                gif_filename = os.path.join(self.session_folder, 'session.gif')
+                gif_filepath = os.path.join(self.session_folder, gif_name )
                 images[0].save(
-                    gif_filename,
+                    gif_filepath,
                     save_all=True,
                     append_images=images[1:],
                     format='GIF',
-                    duration=int(self.gif_frame_duration * 1000),
+                    duration=float(self.gif_frame_duration * 1000),
                     loop=0
                 )
-                logging.info(f"Saved GIF animation: {gif_filename}")
-                messagebox.showinfo("GIF Created", f"GIF saved as {gif_filename}")
+                logging.info(f"Saved GIF animation: {gif_filepath}")
+                messagebox.showinfo("GIF Created", f"GIF saved as {gif_filepath}")
+                gif_created=True 
             else:
                 logging.warning("No valid images found to create GIF.")
                 messagebox.showwarning("No Images", "No valid images found to create GIF.")
         except Exception as e:
             logging.error(f"Failed to create GIF: {e}")
             messagebox.showerror("Error", f"Failed to create GIF: {e}")
+
+        # After the GIF is generated, check if the copy option is enabled
+
+        if self.export_gif_var.get() :
+            formatted_time = time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime(self.start_time))
+            target_folder = os.path.join(  self.gif_export_folder , formatted_time ) 
+            if gif_created : 
+                try:
+                    
+                    # Create subdirectory in the target location (if necessary)
+                    os.makedirs(target_folder,  exist_ok=True)
+                    
+                    # Define the destination path for the GIF
+                    destination_path = os.path.join(target_folder, gif_name)
+                    
+                    # Copy the generated GIF to the target location
+                    shutil.copy(gif_filepath, destination_path)  # Adjust source path accordingly
+                    
+                    logging.info(f"GIF copied to {destination_path}")
+                    messagebox.showinfo("GIF Copied", f"GIF successfully copied to {destination_path}")
+                except Exception as e:
+                    logging.error(f"Error copying GIF: {e}")
+                    messagebox.showerror("Error", f"Failed to copy GIF: {e}")
+
+    def toggle_gif_copy(self):
+        """Toggle the display of the GIF export folder based on the checkbox state."""
+        if self.export_gif_var.get():
+            # Enable GIF export folder selection
+            self.browse_gif_copy_button.config(state=tk.NORMAL)
+            self.gif_export_folder_label.pack(side=tk.LEFT, pady=5)  # Show the export folder label
+        else:
+            # Disable GIF export folder selection
+            self.browse_gif_copy_button.config(state=tk.DISABLED)
+            self.gif_export_folder_label.pack_forget()  # Hide the export folder label
+
+    def select_gif_export(self):
+        """Allow the user to select a new folder for exporting GIFs."""
+        folder_selected = filedialog.askdirectory(initialdir=self.gif_export_folder)
+        if folder_selected:
+            self.gif_export_folder = folder_selected
+            self.gif_export_folder_label.config(text=f"GIF Export Folder: {self.gif_export_folder}")
+            self.config['DEFAULT']['gif_export_folder'] = self.gif_export_folder
 
     def open_last_screenshot_folder(self):
         if os.path.exists(self.session_folder):
