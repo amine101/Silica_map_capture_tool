@@ -12,7 +12,7 @@ To prepare and run the Silica Map Screenshot Tool, follow the steps below:
 Step 1: Clone or download the project
 --------------------------------------
 - If using git, you can clone the repository using:
-    git clone <repository-link>
+    git clone https://github.com/amine101/Silica_map_capture_tool.git
 
 Step 2: Set up a virtual environment (optional but recommended)
 ---------------------------------------------------------------
@@ -34,7 +34,7 @@ Step 4: Ensure Tesseract-OCR is installed
 ------------------------------------------
 - The tool relies on Tesseract-OCR for text extraction. You need to install it separately:
 
-        1. Download Tesseract from https://github.com/tesseract-ocr/tesseract and install it.
+        1. Download Tesseract from https://tesseract-ocr.github.io/tessdoc/Downloads.html and install it.
         2. You might need to manually add the installation path (e.g., `C:\Program Files\Tesseract-OCR\tesseract.exe`) to the system's PATH.
 
 
